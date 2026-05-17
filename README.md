@@ -1,124 +1,264 @@
-# mSigLIP-CLoRA
 
-Official implementation for the paper:
+---
 
-**A Hard Negative-Aware Optimization for Multilingual Text-Based Person Search**
+# A Hard Negative-Aware Optimization for Multilingual Text-Based Person Search
 
-The repository contains the training and evaluation code for the paper method:
-mSigLIP with LoRA, auxiliary Cross-modal Circle Loss, and a curriculum
-hard-mining schedule. It is a paper-focused copy of the training code and keeps
-only the components needed to reproduce the reported Circle Loss experiments.
+This repository contains the official implementation for the paper: **"A Hard Negative-Aware Optimization for Multilingual Text-Based Person Search"**
 
-## Method
+##  Abstract
 
-mSigLIP-CLoRA builds on TBPS-mSigLIP with:
+Multilingual Text-Based Person Search (TBPS) remains challenging in low-resource settings due to ambiguous cross-modal alignment. Although recent methods such as TBPS-mSigLIP employ noise-robust contrastive learning, they suffer from **limited gradient discrimination** between easy and hard negatives.
 
-- `N-ITC`: sigmoid image-text contrastive alignment with MVS augmentation.
-- `Cross-modal Circle Loss`: auxiliary hard-negative mining on normalized
-  image/text embeddings.
-- `C-ITC`: cyclic image-text consistency regularization.
-- `SimCLR`: self-supervised visual consistency.
-- `LoRA`: parameter-efficient adaptation on attention projections.
+To address this, we propose an efficient optimization framework that integrates **Cross-modal Circle Loss** with **Low-Rank Adaptation (LoRA)**. Circle Loss enhances fine-grained discrimination via adaptive pair-wise re-weighting, while LoRA stabilizes training by constraining optimization to a low-rank subspace. We further introduce a **Curriculum Hard-Mining Schedule** to balance alignment stability and discrimination. Experiments across three typologically diverse languages — Vietnamese, English, and Chinese — demonstrate consistent improvements, establishing a new state-of-the-art **Rank@1 accuracy of 52.28%** on VnPersonSearch and **59.35%** on PRW-TPS-CN, with only **1.57% trainable parameters**. 
 
-The training objective is:
+---
 
-```text
-L = 1.0 * N-ITC + alpha_5(t) * Circle + 0.1 * C-ITC + 0.4 * SimCLR
+## Current Status Snapshot
+
+| Track | Current state | Next step |
+|---|---|---|
+| **Main training result** | LoRA + Curriculum Circle Loss reaches **52.28% R@1** on VN3K and **59.35% R@1** on PRW-TPS-CN | Preserve as the reported baseline |
+| **NACIR** | Implemented as an experimental replacement for the auxiliary Circle branch; `run_nacir.sh` is available | Validate in `workspace.ipynb`, then run clean/noisy ablations |
+| **Noisy correspondence** | RDE-style caption-shuffle noise is integrated via `dataset.noisy_rate` and `run_noise_experiments.sh` | Use for robustness experiments, mainly FP/noisy-positive validation |
+| **Deployment** | LoRA merge, FP16/FP32 export, ONNX export, and **vision INT8 HTP compile** are working | Compile text encoder, benchmark on RB3, then repeat with real calibration data |
+
+---
+
+##  Framework Architecture
+
+We propose a unified framework constructed upon the **mSigLIP** foundation model. To bridge the gap in hard-negative mining, we incorporate an **Auxiliary Cross-Modal Circle Loss** for geometric refinement and utilize **LoRA** on the Transformer backbone (Query, Key, Value, Output projections) to ensure optimization stability and memory efficiency (allowing **3x** larger batch sizes). Only **5.9M / 376M parameters (1.57%)** are trainable.
+
+![Framework Architecture](figures/framework.png)
+
+*Figure 1: The overall architecture of the proposed Multilingual TBPS framework. It features a dual-pathway optimization: (1) The baseline noise-robust objectives (N-ITC, etc.) for global alignment, and (2) An auxiliary Circle Loss branch for explicit hard-negative mining, stabilized by LoRA.*
+
+---
+
+##  Key Contributions & Analysis
+
+### 1. Theoretical Gradient Analysis
+
+Why does mSigLIP fail on hard negatives? We analyze the gradient dynamics of the standard Sigmoid loss (N-ITC) versus our Circle Loss.
+
+![Gradients](figures/gradient_3d_optimized_pub.png)
+
+*Figure 2: Theoretical visualization of gradient magnitude. (Left) **N-ITC (Cyan)** exhibits vanishing gradients for semi-hard negatives (), leading to insensitivity. **Circle Loss (Red)** imposes a sharp penalty after the margin, effectively mining hard negatives. (Right) Circle Loss maintains strong signals for positive pairs even as they approach similarity 1.0, preventing premature convergence.*
+
+### 2. Geometric Refinement
+
+Our method transforms the embedding space geometry. By applying a **Curriculum Hard-Mining Schedule** (linearly warming up the Circle Loss weight), we prevent the disruption of early global alignment while enforcing strict spherical constraints in later stages.
+
+![Geometric](figures/distribution_final_v5_pub.png)
+
+*Figure 3: Geometric Analysis of Similarity Distribution ( vs. ). (Left) The Baseline distribution converges linearly to the decision boundary (), causing overlap. (Right) **Ours (LoRA + Circle)** lifts the distribution towards the theoretical margin (), creating a clear spherical boundary that separates correct matches from hard negatives.*
+
+---
+
+##  Mathematical Formulation
+
+### Baseline Objective (TBPS-mSigLIP)
+
+The baseline optimizes a multi-task objective over $L_2$-normalized image embeddings $\mathbf{v}_i$ and text embeddings $\mathbf{u}_i$:
+
+$$\mathcal{L}_{\text{base}} = \alpha_1 \mathcal{L}_{N\text{-}ITC} + \alpha_2 \mathcal{L}_{MVS} + \alpha_3 \mathcal{L}_{C\text{-}ITC} + \alpha_4 \mathcal{L}_{SS}$$
+
+**N-ITC** (Noise-robust Image-Text Contrastive) — sigmoid-based pairwise alignment:
+
+$$\mathcal{L}_{N\text{-}ITC} = -\frac{1}{N}\sum_{i=1}^{N}\sum_{j=1}^{N} \log\sigma\!\left(z_{ij}\left(\gamma\,\mathbf{v}_i^\top\mathbf{u}_j - c\right)\right)$$
+
+where $z_{ij} \in \{+1, -1\}$ indicates matched pairs, and $\gamma, c$ are learned scale and bias.
+
+### Auxiliary Cross-Modal Circle Loss
+
+We introduce Circle Loss to explicitly mine hard negatives via adaptive pair-wise re-weighting:
+
+$$\mathcal{L}_{\text{circle}} = \log\left[1 + \sum_{j \in \mathcal{N}} e^{\gamma\,\alpha_n^j(s_n^j - m)} \cdot \sum_{i \in \mathcal{P}} e^{-\gamma\,\alpha_p^i(s_p^i - (1-m))}\right]$$
+
+where $\mathcal{P}$, $\mathcal{N}$ are positive/negative pair sets, $s$ is cosine similarity, $\gamma=128$ is the scale factor, and $m=0.35$ is the margin. The adaptive weights:
+
+$$\alpha_p^i = [1 + m - s_p^i]_+, \qquad \alpha_n^j = [s_n^j + m]_+$$
+
+dynamically amplify gradients for hard samples (poorly separated pairs) while suppressing well-separated ones.
+
+### Total Objective with Curriculum Schedule
+
+$$\mathcal{L} = \mathcal{L}_{\text{base}} + \alpha_5(t) \cdot \mathcal{L}_{\text{circle}}$$
+
+The curriculum schedule for $\alpha_5(t)$ prevents early disruption of global alignment:
+
+| Epoch $t$ | $\alpha_5(t)$ | Phase |
+|---|---|---|
+| $t \leq 5$ | $0$ | Warmup (Circle off) |
+| $5 < t \leq 20$ | $0.1 \times \frac{t - 5}{15}$ | Linear ramp |
+| $t > 20$ | $0.1$ | Stable |
+
+---
+
+
+##  Experimental Results
+
+We evaluate our method on **3000VnPersonSearch** (Low-resource, Vietnamese), **CUHK-PEDES** (High-resource, English), and **PRW-TPS-CN** (Chinese).
+
+### Quantitative Performance (VN3K)
+
+Our method with Curriculum Learning achieves State-of-the-Art performance, significantly outperforming the full fine-tuning baseline despite using only 1.57% trainable parameters.
+
+| Method                       | R@1   | R@5   | R@10  | mAP   | mINP  |
+| ---------------------------- | ----- | ------| ----- | ----- | ----- |
+| TBPS-mSigLIP (Full FT)       | 49.70 | 75.93 | 84.75 | 54.96 | 48.66 |
+| Ours (LoRA Only)             | 49.90 | 78.05 | 86.30 | 55.83 | 49.45 |
+| Ours (LoRA + Circle Fixed)   | 50.53 | 77.78 | 86.43 | 55.94 | 49.37 |
+| **Ours (LoRA + Curriculum)** | **52.28** | **79.55** | **88.03** | **57.32** | **50.57** |
+
+*Best result with seed 2400. Mean over 3 seeds: R@1 = 51.52 +/- 0.68%.*
+
+### Quantitative Performance (10% CUHK-PEDES, English)
+
+| Method                       | R@1   | R@5   | R@10  | mAP   | mINP  |
+| ---------------------------- | ----- | ------| ----- | ----- | ----- |
+| TBPS-mSigLIP (Baseline)      | 46.73 | 68.65 | 77.55 | 41.75 | 26.56 |
+| Ours (LoRA + Circle Fixed)   | 56.87 | **77.18** | 84.15 | 50.70 | 34.61 |
+| **Ours (LoRA + Curriculum)** | **57.10** | 76.98 | **84.34** | **50.90** | **34.85** |
+
+### Quantitative Performance (PRW-TPS-CN, Chinese)
+
+| Method                       | R@1   | R@5   | R@10  | mAP   | mINP  |
+| ---------------------------- | ----- | ------| ----- | ----- | ----- |
+| TPAN                         | 21.63 | 42.54 | 52.99 | -     | -     |
+| TBPS-mSigLIP (Baseline)      | 46.78 | 60.28 | 66.82 | 35.41 | 10.61 |
+| **Ours (mSigLIP-CLoRA)**    | **59.35** | **70.58** | **75.48** | **46.44** | **15.10** |
+
+### Qualitative Visualization
+
+The baseline often retrieves visually similar distractors (hard negatives). Our method successfully discriminates fine-grained attributes (e.g., shoe color, logo details).
+
+![Visualize](figures/flipped_cases_visualization.png)
+
+*Figure 4: Qualitative comparison. Green boxes indicate correct matches; Red boxes are incorrect. Note how our method ranks the Ground Truth at #1 even in challenging cases where the baseline fails.*
+
+---
+
+##  Repository Structure
+
 ```
-
-Circle Loss uses a curriculum schedule:
-
-| Epoch | Circle weight |
-|---|---:|
-| 0-5 | 0.0 |
-| 6-20 | linear ramp to 0.1 |
-| 21-60 | 0.1 |
-
-## Main Result
-
-| Dataset | Method | R@1 | R@5 | R@10 | mAP | mINP |
-|---|---|---:|---:|---:|---:|---:|
-| 3000VnPersonSearch | LoRA + Curriculum Circle | 52.28 | 79.55 | 88.03 | 57.32 | 50.57 |
-| PRW-TPS-CN | mSigLIP-CLoRA | 59.35 | 70.58 | 75.48 | 46.44 | 15.10 |
-| 10% CUHK-PEDES | mSigLIP-CLoRA | 57.10 | 76.98 | 84.34 | 50.90 | 34.85 |
-
-## Repository Layout
-
-```text
-trainer.py                 # Hydra training entry point
-test.py                    # Evaluation entry point
-lightning_data.py          # TBPSDataModule
-lightning_models.py        # Lightning module
-model/
-  tbps.py                  # Forward pass and loss routing
-  objectives.py            # N-ITC, Circle, C-ITC, SimCLR
-  lora.py                  # PEFT LoRA wrapper
-  siglip/                  # Local mSigLIP implementation
-config/
-  cir_msiglip.yaml         # Main experiment config
-  loss/cir_msiglip.yaml    # Paper loss settings
-  lora/default.yaml        # LoRA r=32, alpha=64
-data/                      # Dataset loaders
-solver/                    # Optimizer and scheduler
-utils/                     # Metrics and utilities
-docs/                      # Architecture and experiment summary
-paper/                     # LaTeX source and paper figures
+├── trainer.py                         # Training entry point (Hydra)
+├── lightning_models.py                # LitTBPS (PyTorch Lightning module)
+├── lightning_data.py                  # TBPSDataModule, noisy correspondence injection
+├── test.py                            # Evaluation script
+├── run_cir_loss.sh                    # LoRA + Curriculum Circle Loss training
+├── run_noise_experiments.sh           # RDE-style noisy-correspondence sweep
+├── run_full_finetune.sh               # Full fine-tuning baseline
+├── noiseindex/                        # Saved caption-shuffle index mappings
+│
+├── model/                             # Model architecture
+│   ├── tbps.py                        # TBPS forward pass & loss routing
+│   ├── objectives.py                  # N-ITC, Circle, NACIR objective entrypoints
+│   ├── reid_objectives.py             # ReID-specific objectives
+│   ├── build.py                       # Backbone builder with layer resize
+│   ├── lora.py                        # LoRA integration via PEFT
+│   └── siglip/                        # mSigLIP model implementation
+│
+├── data/                              # Dataset classes & augmentation
+│   ├── vn3k_vi.py                     # VN3K Vietnamese
+│   ├── vn3k_en.py                     # VN3K English
+│   ├── vn3k_mixed.py                  # VN3K mixed-language
+│   ├── cuhkpedes.py                   # CUHK-PEDES
+│   ├── prw_tps_cn.py                  # PRW-TPS-CN (Chinese)
+│   ├── bases.py                       # Dataset classes + inject_noisy_correspondence()
+│   ├── sampler.py                     # RandomIdentitySampler
+│   └── augmentation/                  # Image & text augmentation pools
+│
+├── solver/                            # Optimization
+│   ├── build.py                       # Optimizer with param groups
+│   └── lr_scheduler.py                # Cosine LR with warmup
+│
+├── config/                            # Hydra configuration
+│   ├── cir_msiglip.yaml               # Main config
+│   ├── loss/cir_msiglip.yaml          # Loss flags, Circle, NACIR config
+│   ├── backbone/                      # Backbone settings
+│   ├── trainer/                       # Training hyperparams
+│   ├── optimizer/                     # AdamW param groups
+│   ├── scheduler/                     # LR schedule
+│   ├── lora/                          # LoRA config
+│   ├── dataset/                       # Dataset configs, noisy_rate/noisy_file defaults
+│   ├── tokenizer/                     # Tokenizer settings
+│   ├── logger/                        # W&B logger config
+│   └── aug/                           # Augmentation settings
+│
+├── utils/                             # Metrics, visualization, tokenizer utilities
+├── scripts/                           # Helper scripts for checkpoints/data preparation
+├── experiments/                       # Experiment logs & ablation notes
+├── reports/                           # Design notes and implementation plans
+├── changelog/                         # Training/deployment changelogs
+├── figures/                           # Paper figures
+└── docs/                              # Project documentation
+    ├── ARCHITECTURE.md                # Full architecture with diagrams
+    └── EXPERIMENT_SUMMARY.md          # Canonical experiment record
+    
 ```
+---
 
-## Setup
+##  Installation
 
-Python 3.11 is recommended.
+### 1. Clone and Setup
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/pahmlam/Research_on_CircleLoss_for_TBPS-mSigLIP.git
+cd Research_on_CircleLoss_for_TBPS-mSigLIP
+./setup.sh
+
 ```
 
-The default backbone config expects multilingual SigLIP weights at:
+### 2. Environment
 
-```text
-m_siglip_checkpoints/model.safetensors
+We recommend using `uv` for fast dependency management.
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+
 ```
 
-Dataset paths are configured through Hydra in `config/dataset/*.yaml`.
+### 3. Prepare Data & Checkpoints
 
-## Training
+Download the `siglip-base-patch16-256-multilingual` checkpoints and organize your datasets (VN3K, CUHK-PEDES) in the root directory.
 
-Run the reported LoRA + curriculum Circle Loss configuration:
+```bash
+uv run scripts/prepare_checkpoints.py
+
+```
+
+---
+
+##  Training
+
+Use the provided scripts for normal experiments. The scripts keep the Hydra overrides in one place and avoid long ad-hoc command lines.
+
+### Train with Curriculum Hard-Mining (Recommended)
+
+This runs the proposed method: LoRA + mSigLIP + Auxiliary Circle Loss with a warm-up schedule.
 
 ```bash
 ./run_cir_loss.sh
 ```
 
-Equivalent Hydra entry point:
 
-```bash
-uv run trainer.py -cn cir_msiglip \
-  trainer.max_epochs=60 \
-  trainer.accumulate_grad_batches=3 \
-  ++trainer.precision=16-mixed \
-  optimizer=cir_test \
-  optimizer.param_groups.default.lr=1e-4 \
-  +lora=default
-```
 
-For full fine-tuning without LoRA:
+### Full Fine-Tuning Baseline
 
 ```bash
 ./run_full_finetune.sh
 ```
 
-## Paper
-
-The paper source is under `paper/`. From that directory:
+### Train Baseline (mSigLIP)
 
 ```bash
-pdflatex paper.tex
-bibtex paper
-pdflatex paper.tex
-pdflatex paper.tex
+uv run trainer.py -cn m_siglip img_size_str="'(256,256)'" dataset=vn3k loss.softlabel_ratio=0.0 trainer.max_epochs=60
+
 ```
 
-## Notes
+---
 
-Large artifacts are intentionally not versioned: datasets, checkpoints, model
-weights, logs, generated outputs, and virtual environments.
+##  Contact
+
+For any questions, please open an issue or contact the authors.
