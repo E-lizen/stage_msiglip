@@ -1,0 +1,41 @@
+# Python
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+
+# Training outputs
+outputs/
+multirun/
+lightning_logs/
+tb_logs/
+wandb/
+Log/
+logs/
+
+# Large artifacts
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+*.bin
+*.raw
+checkpoints/
+m_siglip_checkpoints/
+exported_model/
+
+# Datasets
+VN3K/
+CUHK-PEDES/
+datasets/
+
+# Generated data
+*.csv
+
+# OS/editor
+.DS_Store
+.vscode/
