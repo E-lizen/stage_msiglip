@@ -324,7 +324,7 @@ class LitTBPS(L.LightningModule):
     def on_validation_epoch_end(self) -> None:
         """Process validation results at epoch end and cleaning up"""
         try:
-            results, _ = self._compute_metrics(return_ranking=False)
+            results, _ = self._compute_metrics(return_ranking=True)
             self._log_metrics(results, "val")
             self.metrics_container.clear()
             torch.cuda.empty_cache()
