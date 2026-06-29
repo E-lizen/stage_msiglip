@@ -119,6 +119,7 @@ class TBPS(nn.Module):
             torch.Tensor: Tensor containing the similarity targets.
         """
         sim_targets = torch.eq(pids.view(-1, 1), pids.view(1, -1)).float()
+        
         if use_sigmoid:
             sim_targets = (
                 -torch.ones_like(sim_targets) + 2 * sim_targets
@@ -128,6 +129,34 @@ class TBPS(nn.Module):
         return sim_targets / sim_targets.sum(
             dim=1, keepdim=True
         )
+
+    def prepare_semantic_sim_targets(self, pids, text_features, threshold=0.90, use_sigmoid=False):
+        """
+        Prepare similarity targets with TRUE MINING (False Negative Elimination).
+        """
+        # 1. Les labels stricts basés sur l'identité (PIDs)
+        sim_targets = torch.eq(pids.view(-1, 1), pids.view(1, -1)).float()
+        
+        # 2. Le True Mining : Détection des clones sémantiques
+        with torch.no_grad():
+            # Normalisation des textes pour avoir une similarité cosinus pure
+            text_features_norm = nn.functional.normalize(text_features, dim=1, p=2)
+            text_sim = torch.matmul(text_features_norm, text_features_norm.t())
+            
+            # Masque binaire : 1 si la similarité dépasse le seuil de tolérance
+            semantic_clones = (text_sim > threshold).float()
+        
+        # 3. Fusion (Logical OR) : Est positif s'il a le même PID OU la même description
+        # torch.max garde les 1 des PIDs et ajoute les 1 des clones sémantiques
+        refined_targets = torch.max(sim_targets, semantic_clones)
+
+        if use_sigmoid:
+            refined_targets = (
+                -torch.ones_like(refined_targets) + 2 * refined_targets
+            )  # -1 if different, 1 if same/clone
+            return refined_targets
+
+        return refined_targets / refined_targets.sum(dim=1, keepdim=True)
 
     def forward(self, batch, current_epoch=None):
         ret = dict()
@@ -183,8 +212,12 @@ class TBPS(nn.Module):
 
         # --- B. N-ITC ---
         if self.config.loss.get("NITC", None):
-            sim_targets = self.prepare_sim_targets(batch["pids"], self.use_sigmoid)
-
+            sim_targets = self.prepare_semantic_sim_targets(
+                pids=batch["pids"], 
+                text_features=caption_pooler_output.detach(), # On détache pour ne pas fausser les gradients textuels
+                threshold=0.90, # À ajuster entre 0.85 et 0.95 selon tes tests
+                use_sigmoid=self.use_sigmoid
+            )
             nitc_loss = objectives.compute_constrative(
                 image_features=image_pooler_output,
                 text_features=caption_pooler_output,
@@ -198,7 +231,7 @@ class TBPS(nn.Module):
                 aug_images = batch["aug_images"]
                 aug_images_features = self.encode_image(aug_images)
                 augmented_nitc_loss = objectives.compute_constrative(
-                    image_features=image_pooler_output,
+                    image_features=aug_images_features,
                     text_features=caption_pooler_output,
                     sim_targets=sim_targets,
                     logit_scale=logit_scale,
@@ -214,11 +247,11 @@ class TBPS(nn.Module):
             circle_m = self.config.loss.get("circle_margin", 0.25)
             circle_gamma = self.config.loss.get("circle_gamma", 128)
 
-            cm_circle_loss = objectives.compute_cross_modal_circle(
+            cm_circle_loss = objectives.compute_ultimate_circle_loss(
                 image_features=image_pooler_output,
                 text_features=caption_pooler_output,
                 pids=batch["pids"],
-                m=circle_m,
+                #m=circle_m,
                 gamma=circle_gamma
             )
 
@@ -229,11 +262,11 @@ class TBPS(nn.Module):
                     aug_images = batch["aug_images"]
                     aug_images_features = self.encode_image(aug_images)
 
-                aug_cm_circle_loss = objectives.compute_cross_modal_circle(
+                aug_cm_circle_loss = objectives.compute_ultimate_circle_loss(
                     image_features=aug_images_features,
                     text_features=caption_pooler_output,
                     pids=batch["pids"],
-                    m=circle_m,
+                    #m=circle_m,
                     gamma=circle_gamma
                 )
                 final_circle_loss = (cm_circle_loss + aug_cm_circle_loss) / 2
