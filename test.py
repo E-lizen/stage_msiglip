@@ -44,6 +44,38 @@ def run_test(ckpt_path: str | Path, dataset_name: str):
     trainer = L.Trainer(**config.trainer)
     trainer.test(model, test_loader)
 
+def run_test_late(ckpt_path: str | Path, dataset_name: str):
+    # this function was added because i had issues with the launching of lora using the first one
+    # if this version doesn't work, please try run_test() instead.
+    print("\n🚩 STEP 1 : script launching, LoRA preparation...")
+    import torch
+    from lightning.pytorch import seed_everything
+    import lightning as L
+    
+    # 1. Open checkpoint
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    vrai_config = ckpt["hyper_parameters"]["config"]
+    
+    # 2. light up the model with the correct config
+    model = LitTBPS(config=vrai_config, num_iters_per_epoch=239)
+    
+    if "lora" in vrai_config:
+        print("🛠️ LoRA activation...")
+        model.setup_lora(vrai_config["lora"])
+    else:
+        print("⚠️ no lora config in the checkpoint.")
+
+    # 3. Load the state dict into the model
+    model.load_state_dict(ckpt["state_dict"], strict=False)
+    print("🚩 STEP 2 : Model loaded successfully and LoRA is in place !")
+
+
+    seed_everything(vrai_config["seed"])
+    test_loader = load_test_loader(dataset_name, vrai_config)
+    trainer = L.Trainer(**vrai_config["trainer"])
+    
+    print("\n🚩 STEP 3 : Beginning evaluation...")
+    trainer.test(model, test_loader)
 
 if __name__ == "__main__":
-    fire.Fire(run_test)
+    fire.Fire(run_test_late)

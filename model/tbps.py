@@ -158,7 +158,40 @@ class TBPS(nn.Module):
 
         return refined_targets / refined_targets.sum(dim=1, keepdim=True)
 
-    def forward(self, batch, current_epoch=None):
+    def prepare_soft_semantic_sim_targets(
+        self,
+        pids,
+        text_features,
+        threshold=0.90,
+        soft_weight=0.5,
+        use_sigmoid=False,
+    ):
+        """
+        Prepare soft semantic similarity targets.
+
+        Semantically-close negatives are down-weighted instead of being
+        treated as full positives. This keeps the learning signal for
+        confused pairs while avoiding excessive label smoothing.
+        """
+        sim_targets = torch.eq(pids.view(-1, 1), pids.view(1, -1)).float()
+
+        with torch.no_grad():
+            text_features_norm = nn.functional.normalize(text_features, dim=1, p=2)
+            text_sim = torch.matmul(text_features_norm, text_features_norm.t())
+            semantic_clones = (text_sim > threshold).float()
+
+        # Keep strict PID positives, but soften semantic clones
+        soft_targets = sim_targets.clone()
+        soft_targets = soft_targets + semantic_clones * soft_weight
+        soft_targets = torch.clamp_max(soft_targets, 1.0)
+
+        if use_sigmoid:
+            soft_targets = -torch.ones_like(soft_targets) + 2 * soft_targets
+            return soft_targets
+
+        return soft_targets / soft_targets.sum(dim=1, keepdim=True)
+
+    def forward(self, batch, current_epoch=0, tm_threshold=0.90):
         ret = dict()
 
         caption_input = {
@@ -212,7 +245,7 @@ class TBPS(nn.Module):
 
         # --- B. N-ITC ---
         if self.config.loss.get("NITC", None):
-            sim_targets = self.prepare_semantic_sim_targets(
+            sim_targets = self.prepare_soft_semantic_sim_targets(
                 pids=batch["pids"], 
                 text_features=caption_pooler_output.detach(), # On détache pour ne pas fausser les gradients textuels
                 threshold=0.90, # À ajuster entre 0.85 et 0.95 selon tes tests
@@ -247,12 +280,12 @@ class TBPS(nn.Module):
             circle_m = self.config.loss.get("circle_margin", 0.25)
             circle_gamma = self.config.loss.get("circle_gamma", 128)
 
-            cm_circle_loss = objectives.compute_ultimate_circle_loss(
+            cm_circle_loss = objectives.compute_true_mining_circle_loss(
                 image_features=image_pooler_output,
                 text_features=caption_pooler_output,
                 pids=batch["pids"],
-                #m=circle_m,
-                gamma=circle_gamma
+                gamma=circle_gamma,
+                
             )
 
             final_circle_loss = cm_circle_loss
@@ -262,12 +295,13 @@ class TBPS(nn.Module):
                     aug_images = batch["aug_images"]
                     aug_images_features = self.encode_image(aug_images)
 
-                aug_cm_circle_loss = objectives.compute_ultimate_circle_loss(
+                aug_cm_circle_loss = objectives.compute_asym_true_mining_circle_loss(
                     image_features=aug_images_features,
                     text_features=caption_pooler_output,
                     pids=batch["pids"],
                     #m=circle_m,
-                    gamma=circle_gamma
+                    gamma=circle_gamma,
+                    #tm_threshold=tm_threshold
                 )
                 final_circle_loss = (cm_circle_loss + aug_cm_circle_loss) / 2
 

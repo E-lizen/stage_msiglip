@@ -96,6 +96,21 @@ class LitTBPS(L.LightningModule):
 
     ############# SETTING UP LORA ######################
     def setup_lora(self, lora_config: Dict) -> None:
+    # --- corrected version 
+        def custom_enable_input_require_grads():
+            
+            def make_inputs_require_grad(module, input, output):
+                output.requires_grad_(True)
+                
+            if hasattr(self.backbone, "text_model") and hasattr(self.backbone.text_model, "embeddings"):
+                self.backbone.text_model.embeddings.register_forward_hook(make_inputs_require_grad)
+                
+            if hasattr(self.backbone, "vision_model") and hasattr(self.backbone.vision_model, "embeddings"):
+                self.backbone.vision_model.embeddings.register_forward_hook(make_inputs_require_grad)
+                
+        self.backbone.enable_input_require_grads = custom_enable_input_require_grads
+        # ----------------------------------------------------------------
+
         self.backbone = get_lora_model(self.backbone, lora_config)
         self.backbone.print_trainable_parameters()
 
@@ -111,6 +126,9 @@ class LitTBPS(L.LightningModule):
 
         # Build model components
         self.backbone = build_backbone_with_proper_layer_resize(self.config.backbone)
+
+        self.backbone.gradient_checkpointing_enable()
+
         self.model = TBPS(
             config=self.config,
             backbone=self.backbone,
@@ -181,10 +199,13 @@ class LitTBPS(L.LightningModule):
                 logger.info(f"Initial loss: {loss.item():.4f}")
 
             return loss
-
+    
         except Exception as e:
             logger.error(f"Error in training step: {str(e)}")
             raise ModelException(f"Training step failed: {str(e)}")
+        
+        
+
 
     def configure_optimizers(self):
         optimizer = build_optimizer(self.config.optimizer, self.model)
