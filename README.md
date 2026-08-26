@@ -3,7 +3,7 @@
 
 # A Hard Negative-Aware Optimization for Multilingual Text-Based Person Search
 
-This repository contains the official implementation for the paper: **"A Hard Negative-Aware Optimization for Multilingual Text-Based Person Search"**
+This repository contains modification to the official implementation for the paper: **"A Hard Negative-Aware Optimization for Multilingual Text-Based Person Search"**
 
 ##  Abstract
 
